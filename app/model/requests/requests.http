@@ -1,0 +1,10 @@
+POST http://0.0.0.0:7000/api/onboarding/message
+Content-Type: application/json
+
+{
+
+  "rid": "session-123",
+  "phone": "5581999999999",
+  "employee_name": "funcionario",
+  "msg": "É SIM"
+}

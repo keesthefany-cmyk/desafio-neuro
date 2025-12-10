@@ -1,0 +1,32 @@
+autogen-core>=0.4.9
+autogen-agentchat>=0.4.9
+
+# ▪ EXTENSÕES AUTOGEN
+autogen-ext[openai]>=0.4.9
+autogen-ext[anthropic]>=0.4.9
+
+# ▪ MODELOS LLM
+openai>=1.30.0
+anthropic>=0.25.0
+google-generativeai>=0.2.0
+
+# ▪ WEB FRAMEWORK
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# ▪ BANCO DE DADOS (Redis local)
+redis[asyncio]>=5.0.0
+aioredis>=2.0.1
+
+# ▪ ELASTICSEARCH (RAG)
+elasticsearch>=8.11.0
+
+# ▪ UTILITÁRIOS
+pyyaml>=6.0
+python-multipart>=0.0.6
+httpx>=0.25.0
+
+# ▪ LOGGING
+python-json-logger>=2.0.7

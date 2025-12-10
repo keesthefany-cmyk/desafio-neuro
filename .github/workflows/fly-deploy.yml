@@ -1,0 +1,25 @@
+# .github/workflows/fly-deploy.yml
+
+name: Fly Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy app
+    runs-on: ubuntu-latest
+    concurrency: deploy-group   # garante que apenas um deploy rode por vez
+    steps:
+      # 1. Puxar código
+      - uses: actions/checkout@v4
+
+      # 2. Instalar flyctl
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # 3. Deploy no Fly.io (rebuild completo)
+      - run: flyctl deploy --remote-only --no-cache --build-arg BUILDKIT_INLINE_CACHE=0
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

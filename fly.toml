@@ -1,0 +1,50 @@
+# fly.toml app configuration file generated for desafio-onboarding on 2025-11-29T23:29:53-03:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'desafio-onboarding'
+primary_region = 'gru'
+
+[build]
+[env]
+  # Paths
+  PROMPTS_PATH = "app/templates/prompts.yaml"
+  RULES_PATH = "app/templates/rules.yaml"
+  BUSINESS_RULES_FILE = "app/templates/rules.md"
+  
+  # ElasticSearch
+  ES_HOST = "http://elastic-sofia.dissertio.com.br/"
+  ES_USER = "elastic"
+  neuro_index_name = "susiatestrag"
+  politicas_index_name = "susiatestrag2"
+  
+  # Models
+  MODEL_TEST = "gpt-4o-mini"
+  MODEL1 = "gpt-4.1-mini"
+  MODEL2 = "gpt-4.1"
+  MODEL3 = "o4-mini"
+  TEMPERATURE = "0.2"
+  MAX_COMPLETION_TOKENS_300 = "300"
+  MAX_COMPLETION_TOKENS_250 = "250"
+  MAX_COMPLETION_TOKENS_150 = "150"
+  
+  # Memory
+  BUFFER_SIZE = "15"
+  TOKEN_LIMIT = "8000"
+  
+  # Google
+  GOOGLE_PROJECT_ID = "projects/391799478816"
+
+[http_service]
+  internal_port = 7000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
