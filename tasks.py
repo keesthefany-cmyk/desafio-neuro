@@ -140,24 +140,11 @@ async def reply_loop(queue_manager: QueueManager):
                 logger.warning(f"[{chat_key}] ⚠️ Mensagem incompleta: faltam campos")
                 continue
 
-            logger.info(f"[{chat_key}] 📤 Enviando para Hyperflow: {agent_message[:80]}...")
-
-            try:
-                result = requests.post(
-                    config.ServerConstants.HYPERFLOW_URL,
-                    json={"audio": audio, "phone": phone, "msg": agent_message},
-                    headers={"client_id": config.ServerConstants.HYPERFLOW_API_KEY},
-                    timeout=config.ServerConstants.HYPERFLOW_TIMEOUT
-                )
-
-                if result.status_code != 200:
-                    logger.error(f"[{chat_key}] ❌ Hyperflow error: {result.status_code} - {result.text[:200]}")
-                else:
-                    logger.info(f"[{chat_key}] ✅ Mensagem enviada via Hyperflow")
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"[{chat_key}] ❌ Falha ao enviar para Hyperflow: {e}")
-
+            logger.info(f"[{chat_key}] 📤 Mensagem pronta para envio")
+            logger.info(f"[{chat_key}] Telefone: {phone} | Audio: {audio}")
+            logger.info(f"[{chat_key}] Conteúdo: {agent_message[:100]}...")
+            
+            # TODO: Integrar com sistema real de envio de mensagens
             await queue_manager.set_chat_status(chat_key, ChatState.WAITING_USER_RESPONSE)
 
         except Exception as e:

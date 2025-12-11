@@ -24,6 +24,7 @@ openai_client = OpenAI(api_key=LLMProviderConstants.OPENAI_API_KEY)
 
 genai.configure(api_key=LLMProviderConstants.GEMINI_API_KEY)
 
+
 es_client = Elasticsearch(
     [ElasticsearchConstants.ES_HOST],
     basic_auth=(
@@ -145,13 +146,19 @@ async def store_employee_data(
     """
     Armazena dados do funcionário em arquivo JSON local.
     
+    Tipos de dados suportados:
+    - dados_pessoais: {"nome": "...", "cpf": "...", "data_nascimento": "..."}
+    - contato: {"email": "...", "telefone": "..."}
+    - dados_bancarios: {"banco": "...", "agencia": "...", "conta": "..."}
+    - documento: {"tipo": "rg|cpf|ctps|comprovante_residencia", "numero": "..."}
+    
     Args:
         user_id: ID único do funcionário
         data_type: "dados_pessoais", "contato", "dados_bancarios", "documento"
         data: Dict com os dados a salvar
     
     Returns:
-        Dict com sucesso e caminho do arquivo
+        Dict com sucesso, progresso e status
     """
     
     try:

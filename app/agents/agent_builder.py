@@ -2,7 +2,6 @@ from typing import Dict, Any
 from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_core.memory import ListMemory, MemoryContent, MemoryMimeType
-from autogen_core.tools import FunctionTool
 from app.configs.config import MemoryConstants
 from app.agents.agent_factory import (
     create_talker_agent,
@@ -10,28 +9,17 @@ from app.agents.agent_factory import (
     create_finalizer_agent,
 )
 from app.configs.logging_config import configurar_logger
+from app.tools.tools import (
+    search_knowledge_base_tool,
+    store_employee_data_tool,
+    update_knowledge_base_tool,
+    check_onboarding_status_tool,
+)
 
 logger = configurar_logger(__name__)
 
 BUFFER_SIZE = MemoryConstants.BUFFER_SIZE
 ONBOARDING_RULES_FILE = MemoryConstants.ONBOARDING_RULES_FILE
-
-
-async def search_knowledge_base(query: str) -> str: 
-    return f"Resultado simulado da base de conhecimento para: {query}"
-
-async def store_employee_data(employee_id: str, data: dict) -> str: 
-    return f"Dados do funcionário {employee_id} armazenados com sucesso" 
-async def update_knowledge_base(entry_id: str, content: str) -> str: 
-    return f"Entrada {entry_id} atualizada na base de conhecimento" 
-async def check_onboarding_status(employee_id: str) -> str: 
-    return f"Status de onboarding do funcionário {employee_id}: Pendente" 
-
-search_knowledge_base_tool = FunctionTool(search_knowledge_base, description="Buscar informações na base de conhecimento") 
-
-store_employee_data_tool = FunctionTool(store_employee_data, description="Armazenar dados de funcionário") 
-update_knowledge_base_tool = FunctionTool(update_knowledge_base, description="Atualizar base de conhecimento") 
-check_onboarding_status_tool = FunctionTool(check_onboarding_status, description="Verificar status de onboarding")
 
 class AgentBuilder:
     def __init__(self):
@@ -42,18 +30,21 @@ class AgentBuilder:
         self,
         prompts: Dict[str, Any],
         model_clients: Dict[str, OpenAIChatCompletionClient],
+        coordinator_memory=None,
     ) -> Dict[str, AssistantAgent]:
 
-        with open(ONBOARDING_RULES_FILE, "r", encoding="utf-8") as f:
-            rules_content = f.read()
+        # ✅ Se memória do coordinator for passada, usar ela; senão criar nova
+        if coordinator_memory is None:
+            with open(ONBOARDING_RULES_FILE, "r", encoding="utf-8") as f:
+                rules_content = f.read()
 
-        rules_memory = MemoryContent(
-            content=rules_content,
-            mime_type=MemoryMimeType.MARKDOWN
-        )
+            rules_memory = MemoryContent(
+                content=rules_content,
+                mime_type=MemoryMimeType.MARKDOWN
+            )
 
-        coordinator_memory = ListMemory(name="coordinator_memory")
-        await coordinator_memory.add(rules_memory)
+            coordinator_memory = ListMemory(name="coordinator_memory")
+            await coordinator_memory.add(rules_memory)
 
         coordinator = create_coordinator_agent(
             name="coordinator",

@@ -1,6 +1,7 @@
 import os
 import yaml
 import asyncio
+import json
 import uvicorn
 import traceback
 from contextlib import asynccontextmanager
@@ -46,22 +47,9 @@ with open(rules_fpath, "r", encoding="utf-8") as file:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ✅ Iniciar apenas o reply_loop, sem teste de GraphFlow
     asyncio.create_task(tasks.reply_loop(queue_manager))
-    try:
-        test_session_id = "startup-init"
-        chat_key = f"chat:{test_session_id}"
-        orchestrator = AiOrchestrator(
-            session_id=test_session_id,
-            chat_key=chat_key,
-            user_type="",
-            openai_api_key=API_KEY,
-            queue_manager=queue_manager,
-        )
-        await orchestrator.prepare()
-    except Exception as e:
-        logger.error(f"Erro ao inicializar GraphFlow: {e}")
     yield
-
     logger.info("Finalizando aplicação")
 
 app = FastAPI(
@@ -91,12 +79,13 @@ async def health_check_openai():
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Erro ao testar conexão: {str(e)}")
 
+
 @app.post("/api/onboarding/message")
 async def handle_onboarding_message(message: OnboardingMessage):
-    logger.info(f"Recebido: {message.model_dump()}")
     session_id = message.rid
     chat_key = f"chat:{session_id}"
 
+    # Recupera ou cria um orchestrator para essa conversa
     orchestrator = get_orchestrator(chat_key)
     if not orchestrator:
         orchestrator = AiOrchestrator(
@@ -104,23 +93,42 @@ async def handle_onboarding_message(message: OnboardingMessage):
             chat_key=chat_key,
             user_type="",
             openai_api_key=API_KEY,
-            queue_manager=queue_manager
+            queue_manager=queue_manager,
+            phone=message.phone
         )
         await orchestrator.prepare()
         set_orchestrator(chat_key, orchestrator)
 
+    talker_messages = []
+
     try:
-        result = await orchestrator.execute(
+        # Consome o generator de forma assíncrona
+        async for msg in orchestrator.execute(
             first_message=message.msg,
             employee_name=message.employee_name or ""
-        )
+        ):
+            # msg é uma string (mensagem do Talker)
+            # Filtra apenas mensagens reais (não MemoryContent ou outras estruturas)
+            if isinstance(msg, str) and not msg.startswith("[MemoryContent"):
+                talker_messages.append(msg)
+                
+                # Posta na fila global para tasks.py processar
+                outcome_message = json.dumps({
+                    "phone": message.phone,
+                    "msg": msg,
+                    "chat_key": chat_key,
+                    "audio": False
+                })
+                await queue_manager.post_to_global_outcome_queue(outcome_message)
+
+        # Finaliza a conversa se necessário
         if orchestrator.conversation_manager.is_conversation_finished():
             await orchestrator.cleanup()
             remove_orchestrator(chat_key)
 
         return {
             "session_id": session_id,
-            "response": result
+            "response": talker_messages
         }
 
     except Exception:
