@@ -6,5 +6,5 @@ Content-Type: application/json
   "rid": "session-123",
   "phone": "5581999999999",
   "employee_name": "funcionario",
-  "msg": "quuais dados vc pr4ecisa para o onbording?"
+  "msg": "oi quantos de ferias eu tenho direito"
 }

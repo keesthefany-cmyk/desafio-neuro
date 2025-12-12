@@ -1,6 +1,5 @@
 import json
 import traceback
-import requests
 import asyncio
 from datetime import datetime
 from typing import Dict, Any
@@ -18,6 +17,7 @@ queue_manager = QueueManager()
 # LOOP PRINCIPAL DE CONVERSA (COM AI_ORCHESTRATOR)
 ###############################################################################
 
+
 async def conversation_loop(
     session_id: str,
     chat_key: str,
@@ -28,77 +28,58 @@ async def conversation_loop(
     employee_name: str = ""
 ):
     """
-    Executa o AiOrchestrator completamente
+    Executa o AiOrchestrator completamente.
+
+    Aqui apenas roda o fluxo e retorna um resultado estruturado.
+    Quem decide enfileirar mensagem para o usuário é main.py.
     """
     logger.info(f"[{chat_key}] ▶️ Iniciando loop de conversa com AI...")
 
     orchestrator = None
     try:
-        # 1. CRIAR ORQUESTRADOR (sem user_type)
         orchestrator = AiOrchestrator(
             session_id=session_id,
             chat_key=chat_key,
+            user_type="",
             openai_api_key=config.OpenAI.API_KEY,
             queue_manager=queue_manager,
+            phone=phone,  # se seu construtor aceitar phone
         )
 
-        # 2. PREPARAR AGENTES E GRAPHFLOW
         logger.info(f"[{chat_key}] ⚙️ Preparando agentes e GraphFlow...")
         await orchestrator.prepare()
 
-        # 3. EXECUTAR FLUXO
         logger.info(f"[{chat_key}] 🚀 Executando fluxo de onboarding...")
         result = await orchestrator.execute(
             first_message=first_user_message,
-            employee_name=employee_name
+            employee_name=employee_name,
         )
 
-        # 4. PROCESSAR RESULTADO
         logger.info(f"[{chat_key}] ✅ Fluxo concluído com sucesso")
         logger.debug(f"[{chat_key}] Resultado: {result}")
 
-        # 5. ENVIAR RESPOSTA AO USUÁRIO
-        if result and result.get("finalization_data"):
-            final_message = result["finalization_data"].get(
-                "conteudo", {}
-            ).get("mensagem_final", "Onboarding concluído com sucesso!")
+        return {
+            "status": "success",
+            "result": result,
+            "chat_key": chat_key,
+            "phone": phone,
+        }
 
-            out_msg_str = json.dumps({
-                "phone": phone,
-                "msg": final_message,
-                "chat_key": chat_key,
-                "audio": False
-            })
-            await queue_manager.post_to_global_outcome_queue(out_msg_str)
-            logger.info(f"[{chat_key}] 📤 Resposta final enviada ao usuário")
-
-        # Marcar conversa como finalizada
-        await queue_manager.set_chat_status(chat_key, ChatState.CONVERSATION_ENDED)
-
-    except Exception as e:
+    except Exception:
         error_str = traceback.format_exc()
         logger.error(f"[{chat_key}] ❌ ERRO crítico no loop de conversa:")
         logger.error(f"[{chat_key}] {error_str}")
 
-        # Registrar erro no Redis
-        await queue_manager.set_chat_status(chat_key, ChatState.CONVERSATION_ENDED)
         await queue_manager.append_error(chat_key, error_str)
 
-        # Notificar usuário sobre erro
-        error_msg = "Desculpe, ocorreu um erro ao processar seu onboarding. Tente novamente."
-        out_msg_str = json.dumps({
-            "phone": phone,
-            "msg": error_msg,
+        return {
+            "status": "error",
+            "error": error_str,
             "chat_key": chat_key,
-            "audio": False
-        })
-        try:
-            await queue_manager.post_to_global_outcome_queue(out_msg_str)
-        except:
-            logger.error(f"[{chat_key}] Falha ao enviar mensagem de erro ao usuário")
+            "phone": phone,
+        }
 
     finally:
-        # 6. CLEANUP
         if orchestrator:
             try:
                 await orchestrator.cleanup()
@@ -106,15 +87,19 @@ async def conversation_loop(
             except Exception as e:
                 logger.error(f"[{chat_key}] Erro no cleanup: {e}")
 
-        await queue_manager.end_chat(chat_key)
-        logger.info(f"[{chat_key}] 🏁 Loop de conversa finalizado")
+        logger.info(f"[{chat_key}] 🏁 conversation_loop finalizado")
 
 
 ###############################################################################
-# LOOP DE RESPOSTA
+# LOOP DE RESPOSTA - COM SINCRONIZAÇÃO
 ###############################################################################
+
 
 async def reply_loop(queue_manager: QueueManager):
+    """
+    Loop que consome a fila global de saída e envia mensagens ao usuário.
+    Também sinaliza para main.py quando a mensagem foi processada.
+    """
     logger.debug("🔄 Iniciando reply_loop")
     logger.info("✅ reply_loop pronto para enviar mensagens")
 
@@ -143,11 +128,17 @@ async def reply_loop(queue_manager: QueueManager):
             logger.info(f"[{chat_key}] 📤 Mensagem pronta para envio")
             logger.info(f"[{chat_key}] Telefone: {phone} | Audio: {audio}")
             logger.info(f"[{chat_key}] Conteúdo: {agent_message[:100]}...")
-            
-            # TODO: Integrar com sistema real de envio de mensagens
+
+            # TODO: integrar com sistema real de envio (WhatsApp, etc)
+            # await whatsapp_client.send_message(phone, agent_message)
+
+            # Sinaliza que a mensagem foi processada
+            await queue_manager.mark_messages_processed(chat_key)
+            logger.debug(f"[{chat_key}] ✅ Sinalizado processamento concluído")
+
             await queue_manager.set_chat_status(chat_key, ChatState.WAITING_USER_RESPONSE)
 
-        except Exception as e:
+        except Exception:
             logger.error(f"❌ Erro no reply_loop: {traceback.format_exc()}")
             await asyncio.sleep(5)
 
@@ -155,6 +146,7 @@ async def reply_loop(queue_manager: QueueManager):
 ###############################################################################
 # POSTAGEM DE MENSAGENS INICIAIS
 ###############################################################################
+
 
 async def post_first_messages(
     chat_key: str,
@@ -173,7 +165,6 @@ async def post_first_messages(
     final_first_message = "\n".join(message_list) or first_user_message
     logger.info(f"[{chat_key}] 📥 Buffer contém {len(message_list)} mensagens")
 
-    # Iniciar conversation_loop em background
     asyncio.create_task(
         conversation_loop(
             session_id=session_id,
@@ -182,7 +173,7 @@ async def post_first_messages(
             prompts=prompts,
             rules=rules,
             first_user_message=final_first_message,
-            employee_name=employee_name
+            employee_name=employee_name,
         )
     )
 
@@ -193,6 +184,7 @@ async def post_first_messages(
 ###############################################################################
 # POSTAGEM DE MENSAGENS SUBSEQUENTES
 ###############################################################################
+
 
 async def post_income_messages(
     redis_key: str,
@@ -213,7 +205,7 @@ async def post_income_messages(
     await queue_manager.post_message_to_agent(
         redis_key,
         f"Employee: {employee_name}\n{final_message}",
-        agent="coordinator"
+        agent="coordinator",
     )
     await queue_manager.set_chat_status(redis_key, ChatState.WAITING_AGENT_RESPONSE)
 
@@ -221,6 +213,7 @@ async def post_income_messages(
 ###############################################################################
 # FOLLOW-UP AUTOMÁTICO
 ###############################################################################
+
 
 async def follow_up_and_terminate(chat_key: str, phone: str):
     FOLLOW_UP_DELAY = 10 * 60  # 10 minutos
@@ -232,18 +225,16 @@ async def follow_up_and_terminate(chat_key: str, phone: str):
         logger.info(f"[{chat_key}] Conversa já encerrada")
         return
 
-    # Enviar follow-up
     follow_up_msg = "Olá! Ainda estou por aqui. Alguma dúvida?"
     out_msg = json.dumps({
         "phone": phone,
         "msg": follow_up_msg,
         "chat_key": chat_key,
-        "audio": False
+        "audio": False,
     })
     await queue_manager.post_to_global_outcome_queue(out_msg)
     logger.info(f"[{chat_key}] 📤 Follow-up enviado")
 
-    # Aguardar 30s mais
     await asyncio.sleep(30)
     current_status = await queue_manager.get_chat_status(chat_key)
     if current_status == ChatState.WAITING_USER_RESPONSE:
@@ -251,7 +242,7 @@ async def follow_up_and_terminate(chat_key: str, phone: str):
             "phone": phone,
             "msg": "Conversa encerrada por inatividade. Obrigado!",
             "chat_key": chat_key,
-            "audio": False
+            "audio": False,
         })
         await queue_manager.post_to_global_outcome_queue(closing_msg)
         await queue_manager.end_chat(chat_key)
@@ -262,15 +253,17 @@ async def follow_up_and_terminate(chat_key: str, phone: str):
 # LIMPEZA PERIÓDICA
 ###############################################################################
 
+
 async def cleanup_expired_chats(max_age_hours: int = 168):
     logger.info(f"🧹 Limpeza de chats com mais de {max_age_hours}h")
     try:
         all_chat_keys = await queue_manager.get_all_chat_keys()
         cleaned = 0
+        now_ts = datetime.now().timestamp()
         for chat_key in all_chat_keys:
             last_activity = await queue_manager.get_last_activity(chat_key)
             if last_activity:
-                hours_inactive = (datetime.now().timestamp() - last_activity) / 3600
+                hours_inactive = (now_ts - last_activity) / 3600
                 if hours_inactive > max_age_hours:
                     await queue_manager.delete_chat(chat_key)
                     cleaned += 1

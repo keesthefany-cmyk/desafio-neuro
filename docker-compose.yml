@@ -3,43 +3,13 @@ volumes:
   employee-data:
   es-data:
 
+# ✅ NETWORKS
 networks:
   onboarding-net:
     driver: bridge
 
+# ✅ SERVICES
 services:
-  # ==========================================
-  # ELASTICSEARCH (Base de Conhecimento RAG)
-  # ==========================================
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
-    container_name: onboarding-elasticsearch
-    environment:
-      discovery.type: "single-node"
-      xpack.security.enabled: "false"
-      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
-      bootstrap.memory_lock: "true"
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    volumes:
-      - es-data:/usr/share/elasticsearch/data
-    ports:
-      - "9200:9200"
-    networks:
-      - onboarding-net
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
-    restart: unless-stopped
-
-  # ==========================================
-  # REDIS (Filas e Gerenciamento de Estado)
-  # ==========================================
   redis:
     image: redis:7-alpine
     container_name: onboarding-redis
@@ -61,9 +31,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ==========================================
-  # API FASTAPI (Aplicação Principal)
-  # ==========================================
   api:
     build:
       context: .
@@ -73,19 +40,18 @@ services:
     ports:
       - "7000:7000"
     volumes:
-      - .:/app
-      - employee-data:/app/data/employees
+      - .:/app                           # ✅ Código
+      - employee-data:/app/data/employees # ✅ Dados persistem
     env_file: .env
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      ES_HOST: http://elasticsearch:9200
+      ES_HOST: https://elastic-sofia.dissertio.com.br/
       PORT: 7000
     depends_on:
       redis:
         condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
     networks:
       - onboarding-net
+    restart: unless-stopped

@@ -92,7 +92,7 @@ def create_finalizer_agent(
     model_client,
     tools=None,
     reflect_on_tool_use=False,
-    max_tool_iterations=1,  # ✅ MUDADO DE 0 PARA 1
+    max_tool_iterations=1,  
     model_context=None,
     memory=None
 ):

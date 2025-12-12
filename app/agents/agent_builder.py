@@ -10,10 +10,11 @@ from app.agents.agent_factory import (
 )
 from app.configs.logging_config import configurar_logger
 from app.tools.tools import (
-    search_knowledge_base_tool,
-    store_employee_data_tool,
-    update_knowledge_base_tool,
-    check_onboarding_status_tool,
+    search_knowledge_base,
+    search_politicas_base,
+    store_employee_data,
+    update_knowledge_base,
+    check_onboarding_status,
 )
 
 logger = configurar_logger(__name__)
@@ -32,8 +33,6 @@ class AgentBuilder:
         model_clients: Dict[str, OpenAIChatCompletionClient],
         coordinator_memory=None,
     ) -> Dict[str, AssistantAgent]:
-
-        # ✅ Se memória do coordinator for passada, usar ela; senão criar nova
         if coordinator_memory is None:
             with open(ONBOARDING_RULES_FILE, "r", encoding="utf-8") as f:
                 rules_content = f.read()
@@ -52,11 +51,11 @@ class AgentBuilder:
             description="Gestor especializado em processos de onboarding",
             model_client=model_clients["model1"],
             tools=[
-                search_knowledge_base_tool,
-                store_employee_data_tool,
-                update_knowledge_base_tool,
-    
-                check_onboarding_status_tool,
+                search_knowledge_base,
+                search_politicas_base,
+                store_employee_data,
+                update_knowledge_base,
+                check_onboarding_status,
             ],
             reflect_on_tool_use=True,
             max_tool_iterations=1,
@@ -82,7 +81,6 @@ class AgentBuilder:
         prompts: Dict[str, Any],
         model_clients: Dict[str, OpenAIChatCompletionClient],
     ) -> Dict[str, AssistantAgent]:
-
         with open(ONBOARDING_RULES_FILE, "r", encoding="utf-8") as f:
             rules_content = f.read()
 
@@ -113,7 +111,6 @@ class AgentBuilder:
         base_agents: Dict[str, AssistantAgent],
         specialized_agents: Dict[str, AssistantAgent],
     ) -> Dict[str, AssistantAgent]:
-
         configs = {
             "onboarding": {
                 "coordinator": base_agents["coordinator"],

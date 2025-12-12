@@ -1,3 +1,4 @@
+
 import os
 import yaml
 import asyncio
@@ -7,7 +8,7 @@ import traceback
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from redis import Redis as SyncRedis
 from dotenv import load_dotenv
@@ -47,7 +48,6 @@ with open(rules_fpath, "r", encoding="utf-8") as file:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ✅ Iniciar apenas o reply_loop, sem teste de GraphFlow
     asyncio.create_task(tasks.reply_loop(queue_manager))
     yield
     logger.info("Finalizando aplicação")
@@ -79,19 +79,36 @@ async def health_check_openai():
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Erro ao testar conexão: {str(e)}")
 
-
 @app.post("/api/onboarding/message")
-async def handle_onboarding_message(message: OnboardingMessage):
+async def handle_onboarding_message(
+    message: OnboardingMessage,
+    x_user_type: str = Header()
+):
+    """
+    ✅ CORRIGIDO: Enfileira mensagens AQUI em main.py
+    
+    Fluxo:
+    1. Executa orchestrator
+    2. Recebe resultado (pode ter múltiplas mensagens)
+    3. Enfileira CADA mensagem
+    4. Aguarda reply_loop processar
+    5. Cleanup
+    """
+    logger.info(f"Recebido: {message.model_dump()}")
+    logger.info(f"Tipo de usuário: {x_user_type}")
+    
     session_id = message.rid
     chat_key = f"chat:{session_id}"
 
-    # Recupera ou cria um orchestrator para essa conversa
+    # ✅ Cria event ANTES de tudo
+    processed_event = queue_manager.create_processed_event(chat_key)
+
     orchestrator = get_orchestrator(chat_key)
     if not orchestrator:
         orchestrator = AiOrchestrator(
             session_id=session_id,
             chat_key=chat_key,
-            user_type="",
+            user_type=x_user_type,  # ← AQUI! Recebe o tipo de usuário
             openai_api_key=API_KEY,
             queue_manager=queue_manager,
             phone=message.phone
@@ -102,37 +119,63 @@ async def handle_onboarding_message(message: OnboardingMessage):
     talker_messages = []
 
     try:
-        # Consome o generator de forma assíncrona
-        async for msg in orchestrator.execute(
+        # ✅ Executa fluxo
+        result = await orchestrator.execute(
             first_message=message.msg,
             employee_name=message.employee_name or ""
-        ):
-            # msg é uma string (mensagem do Talker)
-            # Filtra apenas mensagens reais (não MemoryContent ou outras estruturas)
-            if isinstance(msg, str) and not msg.startswith("[MemoryContent"):
-                talker_messages.append(msg)
-                
-                # Posta na fila global para tasks.py processar
-                outcome_message = json.dumps({
-                    "phone": message.phone,
-                    "msg": msg,
-                    "chat_key": chat_key,
-                    "audio": False
-                })
-                await queue_manager.post_to_global_outcome_queue(outcome_message)
-
-        # Finaliza a conversa se necessário
+        )
+        
+        # ✅ NOVO: Enfileira resultado AQUI (se houver)
+        if result:
+            result_str = str(result) if not isinstance(result, str) else result
+            talker_messages.append(result_str)
+            
+            logger.debug(
+                f"[{chat_key}] 📤 Preparando enfileiramento | Len: {len(result_str)}"
+            )
+            
+            # ✅ Cria mensagem para fila
+            outcome_message = json.dumps({
+                "phone": message.phone,
+                "msg": result_str,
+                "chat_key": chat_key,
+                "audio": False
+            })
+            
+            # ✅ Enfileira em queue_manager
+            await queue_manager.post_to_global_outcome_queue(outcome_message)
+            logger.info(f"[{chat_key}] ✅ Mensagem enfileirada em main.py | Len: {len(result_str)}")
+        
+        # ✅ Se conversa acabou, faz cleanup
         if orchestrator.conversation_manager.is_conversation_finished():
+            logger.info(f"[{chat_key}] 🏁 Conversa finalizada, aguardando processamento...")
+            
+            try:
+                # ✅ Aguarda reply_loop processar a fila (timeout 5s)
+                await asyncio.wait_for(processed_event.wait(), timeout=5.0)
+                logger.info(f"[{chat_key}] ✅ Reply_loop processou, limpando...")
+            except asyncio.TimeoutError:
+                logger.warning(f"[{chat_key}] ⚠️  Timeout esperando reply_loop, continuando cleanup")
+            
+            # ✅ Cleanup
             await orchestrator.cleanup()
             remove_orchestrator(chat_key)
+            logger.info(f"[{chat_key}] ✅ Orchestrator removido, sessão finalizada")
 
         return {
             "session_id": session_id,
             "response": talker_messages
         }
 
-    except Exception:
-        logger.error(f"[{chat_key}] Erro:\n{traceback.format_exc()}")
+    except Exception as e:
+        logger.error(f"[{chat_key}] ❌ Erro:\n{traceback.format_exc()}")
+        
+        # ✅ Limpa em caso de erro
+        try:
+            remove_orchestrator(chat_key)
+        except:
+            pass
+        
         raise HTTPException(
             status_code=500,
             detail="Erro interno no onboarding"

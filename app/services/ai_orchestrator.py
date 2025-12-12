@@ -1,15 +1,12 @@
-from typing import Optional, Dict, Any, AsyncGenerator, List
+from typing import Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
-import yaml
-import asyncio
 
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_agentchat.agents import BaseChatAgent
 from autogen_agentchat.messages import TextMessage
 from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
 from autogen_agentchat.conditions import TextMentionTermination
-from autogen_core.memory import ListMemory, MemoryContent, MemoryMimeType
 
 from app.agents.agent_builder import AgentBuilder
 from app.services.conversation_manager import ConversationManager
@@ -18,6 +15,8 @@ from app.services.message_processor import MessageProcessor
 from app.configs.logging_config import configurar_logger
 from app.services.queue_manager import QueueManager
 from app.configs.config import OpenAIConstants, PathSystemPrompts
+
+import yaml
 
 logger = configurar_logger(__name__)
 
@@ -36,43 +35,35 @@ class AiOrchestrator:
         self.user_type = user_type
         self.openai_api_key = openai_api_key
         self.queue_manager = queue_manager
-        self.phone = phone
-
         self.conversation_manager: Optional[ConversationManager] = None
         self.message_processor: Optional[MessageProcessor] = None
         self.model_clients: Dict[str, OpenAIChatCompletionClient] = {}
         self.graph_flow: Optional[GraphFlow] = None
         self.agents: Dict[str, Optional[BaseChatAgent]] = {}
-
         self.final_talker_message: Optional[str] = None
-        self.talker_messages: list[str] = []
         self.is_finished: bool = False
-        
-        # Memória compartilhada
-        self.coordinator_history: List[str] = []
-        self.collected_data: Dict[str, str] = {}
-        self.current_field_index: int = 0
-        
-        # UserProxy reutilizável
-        self.user_proxy: Optional[UserProxyAgent] = None
-        
-        self._coordinator_done_event = asyncio.Event()
-
-        logger.info("[%s] AiOrchestrator inicializado", self.chat_key)
+        self.phone = phone
+        logger.info("[%s] ✨ AiOrchestrator inicializado", self.chat_key)
 
     async def prepare(self) -> None:
+        """Prepara o orquestrador: clientes OpenAI, agentes e grafo"""
+        logger.info("[%s] 🔧 Iniciando prepare()", self.chat_key)
+        
         self._initialize_openai_clients()
         self.message_processor = MessageProcessor(self.chat_key)
-
         self.conversation_manager = ConversationManager(
             session_id=self.session_id,
             redis_key=self.chat_key,
             message_processor=self.message_processor,
         )
-
+        
         await self._initialize_agents_and_graph()
+        logger.info("[%s] ✅ prepare() concluído", self.chat_key)
 
     def _initialize_openai_clients(self):
+        """Inicializa clientes OpenAI para diferentes modelos"""
+        logger.debug("[%s] 📡 Inicializando clientes OpenAI", self.chat_key)
+        
         self.model_clients = {
             "model1": OpenAIChatCompletionClient(
                 model=OpenAIConstants.MODEL1,
@@ -83,91 +74,81 @@ class AiOrchestrator:
         }
 
     async def _initialize_agents_and_graph(self):
+        """Cria agentes especializados e constrói o grafo de conversa"""
+        logger.info("[%s] 🤖 Inicializando agentes", self.chat_key)
+        
         prompts = await self._load_prompts()
         agent_builder = AgentBuilder()
         
-        # Criar memória do coordinator UMA VEZ
-        coordinator_memory = await self._create_coordinator_memory()
-
-        base_agents = await agent_builder.create_base_agents(
-            prompts, self.model_clients, coordinator_memory=coordinator_memory
-        )
+        base_agents = await agent_builder.create_base_agents(prompts, self.model_clients)
         specialized_agents = await agent_builder.create_specialized_agents(prompts, self.model_clients)
-
-        # Criar UserProxy UMA VEZ
-        self.user_proxy = UserProxyAgent(
+        user_proxy = UserProxyAgent(
             name="user",
             chat_key=self.chat_key,
-            phone="",
+            phone=self.phone,
             termination_string="TERMINATE",
             description="User Proxy",
             queue_manager=self.queue_manager,
             user_type=self.user_type,
         )
-
+        
         self.agents = agent_builder.get_agent_configuration(
             agent_type="onboarding",
             base_agents=base_agents,
             specialized_agents=specialized_agents,
         )
+        
+        await self._build_graph_flow(self.agents, user_proxy)
+        logger.info("[%s] ✅ Agentes inicializados", self.chat_key)
 
-        # Construir GraphFlow UMA VEZ
-        await self._build_graph_flow(self.agents, self.user_proxy)
-
-    async def _create_coordinator_memory(self) -> ListMemory:
-        """Cria memória do coordinator com regras e histórico."""
-        from app.configs.config import MemoryConstants
+    async def _build_graph_flow(self, agents, userproxy):
+        """Constrói o grafo de fluxo: UserProxy → Coordinator → Talker → Finalizer"""
+        logger.info("[%s] 🔗 Construindo grafo de fluxo", self.chat_key)
         
-        coordinator_memory = ListMemory(name="coordinator_memory")
-        
-        # Carregar regras
-        with open(MemoryConstants.ONBOARDING_RULES_FILE, "r", encoding="utf-8") as f:
-            rules_content = f.read()
-        
-        rules_memory = MemoryContent(
-            content=rules_content,
-            mime_type=MemoryMimeType.MARKDOWN
-        )
-        await coordinator_memory.add(rules_memory)
-        
-        return coordinator_memory
-
-    async def _build_graph_flow(self, agents, user_proxy):
         builder = DiGraphBuilder()
-
+        
         coordinator = agents.get("coordinator")
         talker = agents.get("talker")
         finalizer = agents.get("finalizer")
-
-        valid_agents = [user_proxy, coordinator, talker]
-        if finalizer:
-            valid_agents.append(finalizer)
+        
+        valid_agents = [userproxy, coordinator, talker, finalizer]
         valid_agents = [a for a in valid_agents if a]
-
+        
         for agent in valid_agents:
             builder.add_node(agent)
-
-        builder.set_entry_point(user_proxy)
-
-        builder.add_edge(user_proxy, coordinator)
+            logger.debug("[%s] 📍 Agente adicionado: %s", self.chat_key, agent.name if hasattr(agent, 'name') else str(agent))
+        
+        # Fluxo: UserProxy → Coordinator → Talker → Finalizer
+        builder.set_entry_point(userproxy)
+        builder.add_edge(userproxy, coordinator)
         builder.add_edge(coordinator, talker)
-        # Finalizer não recebe edge automática
-
+        
+        # if finalizer:
+            # builder.add_edge(talker, finalizer)
+        
         graph = builder.build()
-
+        
         self.graph_flow = GraphFlow(
             graph=graph,
             termination_condition=TextMentionTermination(text="TERMINATE"),
             participants=valid_agents,
         )
+        
+        logger.info("[%s] ✅ Grafo construído com %d agentes", self.chat_key, len(valid_agents))
 
-    async def execute(
-        self, first_message: str, employee_name: str = ""
-    ) -> AsyncGenerator[str, None]:
+    async def execute(self, first_message: str, employee_name: str = ""):
         """
-        Async generator que retorna cada mensagem do Talker assim que produzida.
-        Reutiliza os agentes e GraphFlow já criados em prepare().
+        Executa o fluxo de conversa com a mensagem inicial
+        
+        Args:
+            first_message: Mensagem inicial do usuário
+            employee_name: Nome do funcionário (opcional)
+        
+        Returns:
+            Última mensagem do talker
         """
+        logger.info("[%s] 🚀 Executando fluxo com mensagem: %s", self.chat_key, first_message[:50])
+        
         task = TextMessage(
             content=(
                 f"Data e hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
@@ -177,73 +158,132 @@ class AiOrchestrator:
             ),
             source="user",
         )
+        
+        await self._run_graph_flow(task)
+        
+        logger.info(
+            "[%s] ✅ Fluxo concluído | Final message: %s",
+            self.chat_key,
+            (self.final_talker_message[:50] if self.final_talker_message else "None")
+        )
+        
+        return self.final_talker_message or ""
 
-        async for talker_msg in self._run_graph_flow_stream(task):
-            yield talker_msg
-
-    async def _run_graph_flow_stream(self, initial_message: TextMessage) -> AsyncGenerator[str, None]:
+    async def _run_graph_flow(self, initial_message: TextMessage):
         """
-        Executa o fluxo do grafo e envia mensagens do Talker em tempo real,
-        evitando duplicatas do Coordinator e do Talker.
+        ✅ CORRIGIDO: Executa o fluxo do grafo de forma sequencial
+        
+        Mantém a sessão aberta até receber TERMINATE do finalizer.
+        Não interrompe prematoriamente.
         """
-        processed_talker_messages = set()
-        processed_coordinator_messages = set()
-        user_message_processed = False
-
+        logger.info("[%s] 🔄 Iniciando _run_graph_flow", self.chat_key)
+        
+        event_count = 0
+        
         async for event in self.graph_flow.run_stream(task=initial_message):
-            messages = []
-
-            if hasattr(event, "chat_message") and event.chat_message:
-                messages = [event.chat_message]
-            elif hasattr(event, "messages"):
-                messages = event.messages
-            elif hasattr(event, "message"):
-                messages = [event.message]
-
-            for msg in messages:
-                # Mensagem do usuário
-                if msg.source == "user":
-                    if user_message_processed:
-                        logger.debug("[%s] Mensagem do user já processada, ignorando duplicata", self.chat_key)
-                        continue
-                    user_message_processed = True
-                    logger.debug("[%s] %s: %s", self.chat_key, msg.source, msg.content)
-
-                # Mensagem do Coordinator
-                elif msg.source == "coordinator":
-                    content_str = str(msg.content)
-                    msg_hash = hash(content_str)
-                    if msg_hash in processed_coordinator_messages:
-                        logger.debug("[%s] Coordinator já gerou esta mensagem nesta execução, ignorando", self.chat_key)
-                        continue
-                    processed_coordinator_messages.add(msg_hash)
-                    self.coordinator_history.append(content_str)
-                    logger.debug("[%s] %s: %s", self.chat_key, msg.source, content_str)
-                    self._coordinator_done_event.set()  # libera Talker
-
-                # Mensagem do Talker
-                elif msg.source == "talker":
-                    await self._coordinator_done_event.wait()
-                    content_str = str(msg.content)
-                    msg_hash = hash(content_str)
-                    if msg_hash in processed_talker_messages:
-                        logger.debug("[%s] Mensagem do Talker já processada, ignorando duplicata", self.chat_key)
-                        continue
-                    processed_talker_messages.add(msg_hash)
-                    self.final_talker_message = content_str
-                    self.talker_messages.append(content_str)
-                    logger.debug("[%s] %s: %s", self.chat_key, msg.source, content_str)
-
-                    yield content_str
-
-            if self.conversation_manager.is_conversation_finished():
+            event_count += 1
+            
+            await self._handle_graph_event(event)
+            
+            # ✅ CORRIGIDO: Apenas quebra se talker gerou TERMINATE explicitamente
+            if self.final_talker_message and "TERMINATE" in self.final_talker_message:
+                logger.info(
+                    "[%s] 🏁 TERMINATE detectado! Encerrando após %d eventos",
+                    self.chat_key,
+                    event_count
+                )
                 self.is_finished = True
                 break
+            
+            # ✅ NÃO quebra apenas por is_conversation_finished()
+            # Deixa o GraphFlow natural chegar ao fim
+        
+        logger.info(
+            "[%s] ✅ _run_graph_flow concluído após %d eventos",
+            self.chat_key,
+            event_count
+        )
+
+    async def _handle_graph_event(self, event):
+        """
+        ✅ CORRIGIDO: Processa evento do grafo com logging detalhado
+        
+        - Captura mensagens de múltiplas formas
+        - Log completo da conversa interna
+        - Evita duplicação
+        """
+        messages = []
+        
+        # ✅ Tenta extrair mensagem de múltiplas formas
+        if hasattr(event, "chat_message") and event.chat_message:
+            messages = [event.chat_message]
+            logger.debug("[%s] 📩 Event type: ChatMessage", self.chat_key)
+            
+        elif hasattr(event, "messages") and event.messages:
+            messages = event.messages
+            logger.debug("[%s] 📩 Event type: Messages (%d)", self.chat_key, len(messages))
+            
+        elif hasattr(event, "message") and event.message:
+            messages = [event.message]
+            logger.debug("[%s] 📩 Event type: SingleMessage", self.chat_key)
+        
+        else:
+            # ✅ Registra eventos que não tinham mensagem extraível
+            logger.warning(
+                "[%s] ⚠️  Event sem mensagem: %s | Atributos: %s",
+                self.chat_key,
+                type(event).__name__,
+                [attr for attr in dir(event) if not attr.startswith('_')][:5]
+            )
+            return
+        
+        for idx, msg in enumerate(messages, 1):
+            content = msg.content if hasattr(msg, 'content') else str(msg)
+            
+            if isinstance(content, (list, dict)):
+                content_str = str(content)
+            else:
+                content_str = str(content) if content else ""
+            
+            # ✅ Agora é sempre string
+            content_preview = content_str[:80].replace('\n', ' ')
+            
+            logger.info(
+                "[%s] 💬 [Mensagem %d/%d] %s: %s",
+                self.chat_key,
+                idx,
+                len(messages),
+                msg.source.upper() if hasattr(msg, 'source') else "UNKNOWN",
+                content_preview
+            )
+            
+            await self.conversation_manager.processar_mensagem(msg)
+            
+            if hasattr(msg, 'source') and msg.source == "talker":
+                self.final_talker_message = content_str
+                logger.debug(
+                    "[%s] 📤 Talker message capturado para retorno",
+                    self.chat_key
+                )
 
     async def _load_prompts(self) -> Dict[str, Any]:
+        """Carrega prompts do arquivo YAML"""
+        logger.debug("[%s] 📄 Carregando prompts de %s", self.chat_key, PathSystemPrompts.PROMPTS_PATH)
+        
         with open(Path(PathSystemPrompts.PROMPTS_PATH), "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            prompts = yaml.safe_load(f)
+        
+        logger.debug("[%s] ✅ Prompts carregados: %s", self.chat_key, list(prompts.keys()))
+        
+        return prompts
 
     async def cleanup(self):
-        logger.info("[%s] Cleanup finalizado", self.chat_key)
+        """Limpa recursos da sessão"""
+        logger.info("[%s] 🧹 Iniciando cleanup", self.chat_key)
+        
         self.is_finished = True
+        
+        if self.conversation_manager:
+            await self.conversation_manager.cleanup()
+        
+        logger.info("[%s] ✅ Cleanup finalizado", self.chat_key)

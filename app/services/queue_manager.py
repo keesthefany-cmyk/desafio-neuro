@@ -2,13 +2,13 @@ from enum import Enum
 from typing import List, Optional, Dict, Any
 import json
 import time
-import asyncio
+from asyncio import Event
 
 import redis.asyncio as aioredis
 
-
 from app.configs.logging_config import configurar_logger
 from app.configs.config import config
+
 logger = configurar_logger("queue_manager")
 
 
@@ -23,7 +23,7 @@ class ChatState(str, Enum):
 class QueueManager:
     """
     Gerencia filas Redis usadas pelo sistema.
-    Remove totalmente o campo user_type, pois não é mais usado.
+    Agora com sincronização de eventos entre main.py e reply_loop.
     """
 
     __KEY_STATUS = "status"
@@ -33,23 +33,53 @@ class QueueManager:
     __KEY_LAST_ACTIVITY = "last_activity"
     KEY_ERROR = "errors"
 
-   
     def __init__(self):
         try:
-            # Conecta no Redis usando URL do config
             self.redis = aioredis.from_url(
                 config.redis.REDIS_URL,
                 encoding="utf-8",
-                decode_responses=True
+                decode_responses=True,
             )
             logger.info(f"✅ Conectado ao Redis: {config.redis.REDIS_URL}")
         except Exception as e:
             logger.error(f"❌ Error connecting to Redis: {e}")
             raise
 
+        # Eventos para sincronização (chat_key -> Event)
+        self.messages_processed_events: Dict[str, Event] = {}
+
+    # -------------------------
+    # SINCRONIZAÇÃO DE EVENTOS
+    # -------------------------
+
+    def create_processed_event(self, chat_key: str) -> Event:
+        """
+        Cria um Event para sincronização entre main.py e reply_loop.
+        Deve ser chamado em main.py antes de executar o fluxo.
+        """
+        event = Event()
+        self.messages_processed_events[chat_key] = event
+        logger.debug(f"[{chat_key}] 📍 Event criado para sincronização")
+        return event
+
+    async def mark_messages_processed(self, chat_key: str):
+        """
+        Sinaliza que as mensagens foram processadas em reply_loop.
+        Desbloqueia a espera em main.py (processed_event.wait()).
+        """
+        if chat_key in self.messages_processed_events:
+            event = self.messages_processed_events[chat_key]
+            event.set()
+            logger.info(f"[{chat_key}] ✅ Sinalizado: mensagens processadas")
+            # opcional: limpar para evitar vazamento
+            del self.messages_processed_events[chat_key]
+        else:
+            logger.debug(f"[{chat_key}] ⚠️ Event não encontrado (talvez já processado)")
+
     # -------------------------
     # KEYS
     # -------------------------
+
     @staticmethod
     def _mk_status_key(chat_key: str) -> str:
         return f"{chat_key}:{QueueManager.__KEY_STATUS}"
@@ -69,6 +99,7 @@ class QueueManager:
     # -------------------------
     # Chat lifecycle
     # -------------------------
+
     async def chat_exists(self, chat_key: str) -> bool:
         return await self.redis.exists(self._mk_status_key(chat_key)) != 0
 
@@ -88,6 +119,7 @@ class QueueManager:
     # -------------------------
     # Input buffer
     # -------------------------
+
     async def post_to_input_buffer(self, chat_key: str, message: str) -> None:
         await self.redis.rpush(self._mk_input_buffer_key(chat_key), message)
         await self._touch_last_activity(chat_key)
@@ -99,13 +131,16 @@ class QueueManager:
             if m is None:
                 break
             msgs.append(m)
+
         if msgs:
             await self._touch_last_activity(chat_key)
+
         return msgs
 
     # -------------------------
     # Income messages
     # -------------------------
+
     async def post_message_to_agent(
         self,
         chat_key: str,
@@ -116,7 +151,7 @@ class QueueManager:
         employee_name: str = "",
     ) -> None:
         """
-        Mensagem para agentes — versão SEM user_type.
+        Mensagem para agentes.
         """
         payload = {
             "msg": message,
@@ -129,16 +164,19 @@ class QueueManager:
 
         await self.redis.rpush(
             self._mk_income_messages_key(chat_key),
-            json.dumps(payload)
+            json.dumps(payload),
         )
 
         await self._touch_last_activity(chat_key)
         logger.debug("[%s] Mensagem para '%s' enfileirada", chat_key, agent)
 
-    async def blpop_from_income_messages(self, chat_key: str, timeout: int = 0) -> Optional[Dict[str, Any]]:
+    async def blpop_from_income_messages(
+        self, chat_key: str, timeout: int = 0
+    ) -> Optional[Dict[str, Any]]:
         res = await self.redis.blpop([self._mk_income_messages_key(chat_key)], timeout=timeout)
         if not res:
             return None
+
         _, payload = res
         try:
             return json.loads(payload)
@@ -149,6 +187,7 @@ class QueueManager:
     # -------------------------
     # Outcome queue
     # -------------------------
+
     async def post_to_global_outcome_queue(self, message: str) -> None:
         await self.redis.rpush(QueueManager.__KEY_GLOBAL_OUTCOME_QUEUE, message)
         logger.debug("Mensagem postada na fila global")
@@ -162,6 +201,7 @@ class QueueManager:
     # -------------------------
     # Cleanup
     # -------------------------
+
     async def end_chat(self, chat_key: str) -> None:
         await self.set_chat_status(chat_key, ChatState.CONVERSATION_ENDED)
         await self.redis.delete(self._mk_income_messages_key(chat_key))
@@ -171,6 +211,7 @@ class QueueManager:
     # -------------------------
     # Errors
     # -------------------------
+
     async def append_error(self, chat_key: str, error_message: str) -> None:
         await self.redis.rpush(f"{chat_key}:{self.KEY_ERROR}", error_message)
         await self._touch_last_activity(chat_key)
@@ -185,6 +226,7 @@ class QueueManager:
     # -------------------------
     # Extra
     # -------------------------
+
     async def _touch_last_activity(self, chat_key: str) -> None:
         await self.redis.set(self._mk_last_activity_key(chat_key), str(int(time.time())))
 
